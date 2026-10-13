@@ -1,15 +1,26 @@
 import { waitUntil } from "@vercel/functions";
-import type { Update } from "grammy/types";
+import { InputFile } from "grammy";
+import type { Message, Update } from "grammy/types";
 import { eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getBot } from "@/lib/bots";
 import { getTelegramBot, isAddressedToBot, sendPlain, stripMention } from "@/lib/telegram";
 import { ingestMessage, markUpdateProcessed, recordBotMessage, touchMember } from "@/lib/ingest";
 import { runAgent } from "@/lib/agent";
+import { type Attachment, downloadTelegramFile, fetchAnthropicFile, uploadAttachment } from "@/lib/files";
+import { getGranolaToken } from "@/lib/granola";
 
 export const maxDuration = 300;
 
 const KINDS = ["mentoring", "client", "team", "personal", "generic"];
+
+// A document or photo on this message, or on the one it replies to.
+function pickFile(m?: Message): { fileId: string; fileName: string } | null {
+  if (!m) return null;
+  if (m.document) return { fileId: m.document.file_id, fileName: m.document.file_name ?? "document" };
+  if (m.photo?.length) return { fileId: m.photo[m.photo.length - 1].file_id, fileName: "photo.jpg" };
+  return null;
+}
 
 async function handleUpdate(botId: string, update: Update) {
   const bot = await getTelegramBot(botId);
@@ -71,26 +82,60 @@ async function handleUpdate(botId: string, update: Update) {
 
   // ---- Agent ----------------------------------------------------------
   const addressed = isAddressedToBot(ctx) || text.startsWith("/ask");
-  if (!addressed || !text.trim()) return;
+  if (!addressed) return;
+
+  // Hand the agent any attachment on this message, or on the one it replies to.
+  const tgFile = pickFile(msg) ?? pickFile(msg.reply_to_message);
+  const attachments: Attachment[] = [];
+  let attachNote = "";
+  if (tgFile) {
+    try {
+      const dl = await downloadTelegramFile(botId, bot, tgFile.fileId, tgFile.fileName);
+      attachments.push(await uploadAttachment(dl.bytes, dl.fileName, dl.mime));
+      attachNote = `\n(приложен файл: ${dl.fileName})`;
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      console.error("attachment failed", err);
+      attachNote = `\n(файл приложен, но получить его не удалось: ${err})`;
+    }
+  }
+  if (!text.trim() && !attachments.length) return;
 
   const trigger = msg.chat.type === "private" ? "dm" : msg.reply_to_message ? "reply" : text.startsWith("/ask") ? "command" : "mention";
   const clean = stripMention(ctx, text.replace(/^\/ask(@\w+)?\s*/, ""));
   const quoted = msg.reply_to_message?.text ? `\n(в ответ на #${msg.reply_to_message.message_id}: ${msg.reply_to_message.text})` : "";
+
+  // Granola holds the owner's own meetings, so only the owner gets the toolset.
+  // Everyone else's request is built without it, so there is nothing to bypass.
+  const granolaToken = person?.isOwner ? await getGranolaToken() : null;
 
   await bot.api.sendChatAction(chatId, "typing").catch(() => {});
   try {
     const res = await runAgent({
       space,
       trigger,
-      text: clean + quoted,
+      text: clean + quoted + attachNote,
       askedBy: person ? { id: person.id, label: `${person.firstName ?? ""} ${person.username ? "@" + person.username : ""}`.trim() } : null,
       sourceTgMessageId: msg.message_id,
+      attachments,
+      granolaToken,
     });
     const sent = await bot.api.sendMessage(chatId, res.text, {
       reply_parameters: { message_id: msg.message_id },
       link_preview_options: { is_disabled: true },
     });
     await recordBotMessage(space.id, sent.message_id, res.text);
+
+    // Deliver whatever the sandbox produced as real Telegram documents.
+    for (const fileId of res.generatedFileIds) {
+      try {
+        const f = await fetchAnthropicFile(fileId);
+        const doc = await bot.api.sendDocument(chatId, new InputFile(f.bytes, f.fileName));
+        await recordBotMessage(space.id, doc.message_id, `[файл] ${f.fileName}`);
+      } catch (e) {
+        console.error("send generated file failed", fileId, e);
+      }
+    }
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
     console.error("agent error", err);

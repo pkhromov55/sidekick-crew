@@ -5,9 +5,20 @@ import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getBot } from "./bots";
 import { buildSpaceContext, nowInTz, personLabel } from "./context";
+import { type Attachment, attachmentBlock, collectGeneratedFileIds, FILES_BETA } from "./files";
+import { GRANOLA_MCP_URL } from "./granola";
 
 const MODEL = "claude-opus-5-5";
 const client = new Anthropic();
+
+// Server-side document skills. The container is provisioned lazily — declaring
+// them costs ~1k input tokens per request and nothing else.
+const SKILLS = ["xlsx", "docx", "pptx", "pdf"] as const;
+const CODE_EXECUTION = { type: "code_execution_20260521", name: "code_execution" } as const;
+// Basic web_fetch on purpose: the _20260209 variant filters results through its
+// own code-execution environment, which the docs warn not to pair with ours.
+// It only fetches URLs already present in the conversation.
+const WEB_FETCH = { type: "web_fetch_20250910", name: "web_fetch", max_uses: 5 } as const;
 
 type Space = typeof schema.spaces.$inferSelect;
 
@@ -17,9 +28,19 @@ export type AgentInput = {
   text: string;
   askedBy?: { id: string; label: string } | null;
   sourceTgMessageId?: number;
+  attachments?: Attachment[];
+  // Present only for the owner: unlocks the Granola MCP toolset for this run.
+  granolaToken?: string | null;
 };
 
-export type AgentResult = { text: string; toolCalls: unknown[]; usage: Record<string, unknown>; model: string };
+export type AgentResult = {
+  text: string;
+  toolCalls: unknown[];
+  usage: Record<string, unknown>;
+  model: string;
+  // Anthropic file ids the sandbox produced, for the caller to deliver.
+  generatedFileIds: string[];
+};
 
 async function findPersonByUsername(spaceId: string, username?: string | null) {
   if (!username) return null;
@@ -167,22 +188,61 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     (input.askedBy ? `К тебе обратился ${input.askedBy.label} (trigger: ${input.trigger}).\n` : `Trigger: ${input.trigger}.\n`) +
     `Сообщение:\n${input.text}`;
 
+  // Attachments first, then the text that refers to them.
+  const content: Anthropic.Beta.BetaContentBlockParam[] = [
+    ...(input.attachments ?? []).map(attachmentBlock),
+    { type: "text", text: userText },
+  ];
+
+  // Granola is attached per run and only when the caller passed a token, so a
+  // non-owner's request simply has no Granola tools in it.
+  const granola = input.granolaToken ?? null;
+
   const runner = client.beta.messages.toolRunner({
     model: MODEL,
     max_tokens: 8000,
-    betas: ["server-side-fallback-2026-07-01"],
+    betas: [
+      "server-side-fallback-2026-07-01",
+      "code-execution-2025-08-25",
+      "skills-2025-10-02",
+      FILES_BETA,
+      ...(granola ? (["mcp-client-2025-11-20"] as const) : []),
+    ],
     fallbacks: "default",
     output_config: { effort: "medium" },
+    container: { skills: SKILLS.map((skill_id) => ({ type: "anthropic" as const, skill_id, version: "latest" })) },
+    ...(granola
+      ? {
+          mcp_servers: [
+            { type: "url" as const, name: "granola", url: GRANOLA_MCP_URL, authorization_token: granola },
+          ],
+        }
+      : {}),
     system: [
       { type: "text", text: bot.persona, cache_control: { type: "ephemeral" } },
       { type: "text", text: context },
     ],
-    tools: makeTools(input, calls),
-    messages: [{ role: "user", content: userText }],
+    tools: [
+      CODE_EXECUTION,
+      WEB_FETCH,
+      ...makeTools(input, calls),
+      ...(granola ? [{ type: "mcp_toolset" as const, mcp_server_name: "granola" }] : []),
+    ],
+    messages: [{ role: "user", content }],
     max_iterations: 8,
   });
 
-  const final = await runner.runUntilDone();
+  // Drive the loop by hand: generated files can appear in any intermediate
+  // message, and a server-side tool can stop the turn with pause_turn, which
+  // the runner does not resume on its own.
+  const generatedFileIds: string[] = [];
+  for await (const message of runner) {
+    generatedFileIds.push(...collectGeneratedFileIds(message.content));
+    if (message.stop_reason === "pause_turn") {
+      runner.pushMessages({ role: "assistant", content: message.content });
+    }
+  }
+  const final = await runner.done();
   const text = final.content
     .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
     .map((b) => b.text)
@@ -194,6 +254,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     toolCalls: calls,
     usage: final.usage as unknown as Record<string, unknown>,
     model: final.model,
+    generatedFileIds: [...new Set(generatedFileIds)],
   };
   await db.insert(schema.agentRuns).values({
     spaceId: space.id,
