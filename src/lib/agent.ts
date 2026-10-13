@@ -182,7 +182,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     max_iterations: 8,
   });
 
-  const final = await runner.done();
+  const final = await runner.runUntilDone();
   const text = final.content
     .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
     .map((b) => b.text)
