@@ -71,9 +71,18 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
       `- [${t.id.slice(0, 8)}] ${t.title}${p ? ` — ${personLabel(p)}` : ""}${t.dueAt ? ` — до ${fmtTime(t.dueAt, tz)}` : ""}`,
     );
 
+  // Suppression rules go first and loud: they override anything the raw
+  // message journal below may still mention.
+  const rules = mems.filter((m) => m.kind === "rule");
+  const facts = mems.filter((m) => m.kind !== "rule");
+  if (rules.length) {
+    lines.push(`\n## Правила этого чата (соблюдать строго)`);
+    for (const m of rules) lines.push(`- [${m.id.slice(0, 8)}] ${m.content}`);
+  }
+
   lines.push(`\n## Память`);
-  if (!mems.length) lines.push("(пусто)");
-  for (const m of mems) lines.push(`- (${m.kind}) ${m.content}`);
+  if (!facts.length) lines.push("(пусто)");
+  for (const m of facts) lines.push(`- [${m.id.slice(0, 8)}] (${m.kind}) ${m.content}`);
 
   lines.push(`\n## Последние сообщения (старые сверху)`);
   for (const { m, p } of recent.reverse()) {

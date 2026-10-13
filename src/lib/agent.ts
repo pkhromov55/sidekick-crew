@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodTool } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
-import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getBot } from "./bots";
 import { buildSpaceContext, nowInTz, personLabel } from "./context";
@@ -123,9 +123,12 @@ function makeTools(input: AgentInput, calls: unknown[]) {
 
   const saveMemory = betaZodTool({
     name: "save_memory",
-    description: "Сохранить важный факт, решение, план или предпочтение человека в долгосрочную память этого чата.",
+    description:
+      "Сохранить важный факт, решение, план или предпочтение человека в долгосрочную память этого чата. " +
+      "kind=rule — для запрета или ограничения («X к этому проекту не относится, не учитывать»): правила " +
+      "показываются в контексте отдельно и перекрывают упоминания в истории чата.",
     inputSchema: z.object({
-      kind: z.enum(["fact", "decision", "preference", "person", "plan"]),
+      kind: z.enum(["fact", "decision", "preference", "person", "plan", "rule"]),
       content: z.string().describe("Одно предложение, самодостаточное без контекста"),
       about_username: z.string().optional(),
     }),
@@ -174,7 +177,127 @@ function makeTools(input: AgentInput, calls: unknown[]) {
     },
   });
 
-  return [createTask, completeTask, setReminder, saveMemory, searchMessages];
+  const listMemories = betaZodTool({
+    name: "list_memories",
+    description:
+      "Показать записи памяти этого чата с их короткими id. Нужно перед правкой или удалением, " +
+      "чтобы сослаться на конкретную запись. Без query возвращает последние записи.",
+    inputSchema: z.object({
+      query: z.string().optional().describe("Фильтр по тексту записи"),
+      limit: z.number().int().min(1).max(50).optional(),
+    }),
+    run: async (a) => {
+      const rows = await db
+        .select()
+        .from(schema.memories)
+        .where(
+          and(
+            eq(schema.memories.spaceId, space.id),
+            or(isNull(schema.memories.expiresAt), sql`${schema.memories.expiresAt} > now()`),
+            ...(a.query ? [ilike(schema.memories.content, `%${a.query}%`)] : []),
+          ),
+        )
+        .orderBy(desc(schema.memories.createdAt))
+        .limit(a.limit ?? 20);
+      const r = rows.length
+        ? rows.map((m) => `[${m.id.slice(0, 8)}] (${m.kind}) ${m.content}`).join("\n")
+        : "Ничего не найдено";
+      log("list_memories", a, `${rows.length} rows`);
+      return r;
+    },
+  });
+
+  const updateMemory = betaZodTool({
+    name: "update_memory",
+    description:
+      "Переписать существующую запись памяти по её короткому id. Используй для исправлений " +
+      "(«сессия перенесена с 24.10 на 31.10»), чтобы устаревшая версия не осталась рядом с новой.",
+    inputSchema: z.object({
+      memory_id: z.string().describe("Короткий id из list_memories или из контекста"),
+      content: z.string().describe("Новый текст, самодостаточный без контекста"),
+      kind: z.enum(["fact", "decision", "preference", "person", "plan", "rule"]).optional(),
+    }),
+    run: async (a) => {
+      const rows = await db
+        .update(schema.memories)
+        .set({ content: a.content, ...(a.kind ? { kind: a.kind } : {}) })
+        .where(and(eq(schema.memories.spaceId, space.id), sql`${schema.memories.id}::text like ${a.memory_id + "%"}`))
+        .returning();
+      const r = rows.length ? `Запись обновлена: ${rows[0].content}` : "Запись не найдена";
+      log("update_memory", a, r);
+      return r;
+    },
+  });
+
+  const forgetMemory = betaZodTool({
+    name: "forget_memory",
+    description:
+      "Убрать записи из памяти этого чата. Запись не удаляется физически, а помечается истёкшей, " +
+      "поэтому решение обратимо через restore_memory. По memory_id убирает сразу. По query сначала " +
+      "возвращает список кандидатов и ничего не меняет — режет только с confirm=true. " +
+      "Важно: из истории сообщений это ничего не удаляет; чтобы бот перестал учитывать тему, " +
+      "дополнительно сохрани правило через save_memory с kind=rule.",
+    inputSchema: z.object({
+      memory_id: z.string().optional().describe("Короткий id конкретной записи"),
+      query: z.string().optional().describe("Текстовый фильтр, когда id неизвестен"),
+      confirm: z.boolean().optional().describe("true — выполнить удаление по query"),
+    }),
+    run: async (a) => {
+      if (!a.memory_id && !a.query) return "Нужен memory_id или query";
+      const scope = and(
+        eq(schema.memories.spaceId, space.id),
+        or(isNull(schema.memories.expiresAt), sql`${schema.memories.expiresAt} > now()`),
+        a.memory_id
+          ? sql`${schema.memories.id}::text like ${a.memory_id + "%"}`
+          : ilike(schema.memories.content, `%${a.query}%`),
+      );
+      // A fuzzy request must be shown before it is acted on.
+      if (!a.memory_id && !a.confirm) {
+        const found = await db.select().from(schema.memories).where(scope).limit(50);
+        const r = found.length
+          ? `Под удаление попадут ${found.length} записей:\n` +
+            found.map((m) => `[${m.id.slice(0, 8)}] (${m.kind}) ${m.content}`).join("\n") +
+            "\nПодтверди у человека и вызови снова с confirm=true."
+          : "Ничего не найдено";
+        log("forget_memory", a, `preview ${found.length}`);
+        return r;
+      }
+      const rows = await db.update(schema.memories).set({ expiresAt: new Date() }).where(scope).returning();
+      const r = rows.length
+        ? `Убрано из памяти: ${rows.length}\n` + rows.map((m) => `[${m.id.slice(0, 8)}] ${m.content}`).join("\n")
+        : "Ничего не найдено";
+      log("forget_memory", a, `removed ${rows.length}`);
+      return r;
+    },
+  });
+
+  const restoreMemory = betaZodTool({
+    name: "restore_memory",
+    description: "Вернуть запись, убранную через forget_memory, по её короткому id.",
+    inputSchema: z.object({ memory_id: z.string() }),
+    run: async (a) => {
+      const rows = await db
+        .update(schema.memories)
+        .set({ expiresAt: null })
+        .where(and(eq(schema.memories.spaceId, space.id), sql`${schema.memories.id}::text like ${a.memory_id + "%"}`))
+        .returning();
+      const r = rows.length ? `Возвращено: ${rows[0].content}` : "Запись не найдена";
+      log("restore_memory", a, r);
+      return r;
+    },
+  });
+
+  return [
+    createTask,
+    completeTask,
+    setReminder,
+    saveMemory,
+    searchMessages,
+    listMemories,
+    updateMemory,
+    forgetMemory,
+    restoreMemory,
+  ];
 }
 
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
