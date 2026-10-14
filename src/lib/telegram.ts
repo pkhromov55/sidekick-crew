@@ -23,13 +23,22 @@ export function isAddressedToBot(ctx: Context): boolean {
   const msg = ctx.message;
   if (!msg) return false;
   if (ctx.chat?.type === "private") return true;
-  if (msg.reply_to_message?.from?.id === ctx.me.id) return true;
   const text = msg.text ?? msg.caption ?? "";
   const entities = msg.entities ?? msg.caption_entities ?? [];
   const me = `@${ctx.me.username}`.toLowerCase();
-  return entities.some(
+  const mentionsBot = entities.some(
     (e) => e.type === "mention" && text.slice(e.offset, e.offset + e.length).toLowerCase() === me,
   );
+  if (mentionsBot) return true;
+  // A reply to the bot counts as addressing it only when nobody else is tagged:
+  // "@colleague take this" under a bot message is for the colleague, not for the bot.
+  const mentionsOthers = entities.some(
+    (e) =>
+      e.type === "text_mention" ||
+      (e.type === "mention" && text.slice(e.offset, e.offset + e.length).toLowerCase() !== me),
+  );
+  const replyToBot = msg.reply_to_message?.from?.id === ctx.me.id;
+  return replyToBot && !mentionsOthers;
 }
 
 export function stripMention(ctx: Context, text: string): string {
