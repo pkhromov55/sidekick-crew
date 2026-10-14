@@ -36,15 +36,34 @@ export function stripMention(ctx: Context, text: string): string {
   return text.replace(new RegExp(`@${ctx.me.username}`, "gi"), "").trim();
 }
 
+// Telegram caps messages at 4096 chars; split on paragraph boundaries when possible.
+export function splitForTelegram(text: string, limit = 4000): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    let cut = rest.lastIndexOf("\n\n", limit);
+    if (cut < limit / 2) cut = rest.lastIndexOf("\n", limit);
+    if (cut < limit / 2) cut = rest.lastIndexOf(" ", limit);
+    if (cut < limit / 2) cut = limit;
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  out.push(rest);
+  return out.filter((c) => c.length > 0);
+}
+
 export async function sendPlain(bot: Bot, chatId: number, text: string, replyTo?: number) {
-  // Telegram caps messages at 4096 chars.
-  const chunks = text.match(/[\s\S]{1,4000}/g) ?? [""];
+  const chunks = splitForTelegram(text);
+  const sent = [];
   let first = true;
-  for (const chunk of chunks) {
-    await bot.api.sendMessage(chatId, chunk, {
-      reply_parameters: first && replyTo ? { message_id: replyTo } : undefined,
-      link_preview_options: { is_disabled: true },
-    });
+  for (const chunk of chunks.length ? chunks : ["(пусто)"]) {
+    sent.push(
+      await bot.api.sendMessage(chatId, chunk, {
+        reply_parameters: first && replyTo ? { message_id: replyTo } : undefined,
+        link_preview_options: { is_disabled: true },
+      }),
+    );
     first = false;
   }
+  return sent;
 }

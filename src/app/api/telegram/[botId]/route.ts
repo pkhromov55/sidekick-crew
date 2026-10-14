@@ -120,11 +120,8 @@ async function handleUpdate(botId: string, update: Update) {
       attachments,
       granolaToken,
     });
-    const sent = await bot.api.sendMessage(chatId, res.text, {
-      reply_parameters: { message_id: msg.message_id },
-      link_preview_options: { is_disabled: true },
-    });
-    await recordBotMessage(space.id, sent.message_id, res.text);
+    const sentMsgs = await sendPlain(bot, chatId, res.text, msg.message_id);
+    for (const m of sentMsgs) await recordBotMessage(space.id, m.message_id, m.text ?? "");
 
     // Deliver whatever the sandbox produced as real Telegram documents.
     for (const fileId of res.generatedFileIds) {

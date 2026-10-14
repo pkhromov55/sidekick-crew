@@ -323,7 +323,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
 
   const runner = client.beta.messages.toolRunner({
     model: MODEL,
-    max_tokens: 8000,
+    max_tokens: 32000,
+    stream: true,
     betas: [
       "server-side-fallback-2026-07-01",
       "code-execution-2025-08-25",
@@ -359,21 +360,33 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   // message, and a server-side tool can stop the turn with pause_turn, which
   // the runner does not resume on its own.
   const generatedFileIds: string[] = [];
-  for await (const message of runner) {
+  let final: Anthropic.Beta.BetaMessage | undefined;
+  for await (const stream of runner) {
+    const message = await stream.finalMessage();
+    final = message;
     generatedFileIds.push(...collectGeneratedFileIds(message.content));
     if (message.stop_reason === "pause_turn") {
       runner.pushMessages({ role: "assistant", content: message.content });
     }
   }
-  const final = await runner.done();
-  const text = final.content
+  if (!final) final = await runner.done();
+  let text = final.content
     .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
     .map((b) => b.text)
     .join("\n")
     .trim();
+  if (final.stop_reason === "max_tokens") {
+    text = text
+      ? `${text}\n\n(ответ оборвался по лимиту длины)`
+      : "Ответ получился слишком длинным и оборвался. Попроси короче или скажи «отправь файлом».";
+  } else if (!text && final.stop_reason === "refusal") {
+    text = "Не могу ответить на это.";
+  } else if (!text) {
+    text = "Я ничего не ответил. Переформулируй, пожалуйста.";
+  }
 
   const result: AgentResult = {
-    text: text || (final.stop_reason === "refusal" ? "Не могу ответить на это." : "(пустой ответ)"),
+    text,
     toolCalls: calls,
     usage: final.usage as unknown as Record<string, unknown>,
     model: final.model,
