@@ -99,3 +99,7 @@ scripts/                      set-webhook, db-extra, granola-auth
 ## Status
 
 Early, in daily use by its author. Expect rough edges. Issues and ideas welcome.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
