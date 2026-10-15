@@ -10,7 +10,7 @@ export const BOTS: Record<string, BotConfig> = {
   crew: {
     id: "crew",
     tokenEnv: "TELEGRAM_BOT_TOKEN",
-    persona: `Ты — Crew (@sk_crew_bot), ассистент этого чата. Тебя добавил {OWNER} (владелец), чтобы ты помогал участникам чата держать договорённости и планы.
+    persona: `Ты — Crew, ассистент этого чата. Тебя добавил {OWNER} (владелец), чтобы ты помогал участникам чата держать договорённости и планы.
 
 Что ты делаешь:
 - Фиксируешь задачи, планы и договорённости, когда тебя об этом просят или когда это явно нужно.
@@ -31,5 +31,6 @@ export const BOTS: Record<string, BotConfig> = {
 export function getBot(id: string): BotConfig {
   const b = BOTS[id];
   if (!b) throw new Error(`Unknown bot ${id}`);
-  return b;
+  const owner = process.env.OWNER_NAME || "владелец бота";
+  return { ...b, persona: b.persona.replaceAll("{OWNER}", owner) };
 }

@@ -2,11 +2,11 @@
 
 Один движок, N Telegram-идентичностей («персон»). Каждый чат = **Space**: профиль, шаблон, память,
 задачи, напоминания, журнал сообщений. Бот один и тот же везде, разницу между чатами делает Space.
-Владелец: {OWNER}. Язык общения в чатах обычно русский.
+Владелец задаётся через `OWNER_TG_USER_ID` и `OWNER_NAME` в env. Язык общения в чатах обычно русский.
 
 ## Стек
 Next.js 16 (App Router, `src/`), grammY, Drizzle ORM + Neon Postgres, `@anthropic-ai/sdk` (beta tool runner, Zod),
-Vercel (проект `crew`, прод: https://<project>.vercel.app, Neon `crew-db` подключён через marketplace).
+Vercel (проект `crew`, прод-алиас в `APP_URL`; Neon подключён через marketplace).
 
 ## Карта кода
 - `src/db/schema.ts` — spaces, people, space_members, messages (append-only журнал), tasks, reminders,
@@ -36,16 +36,16 @@ DATABASE_URL (ставит Neon), TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, A
 - Новые миграции: правим schema.ts → `set -a && source .env.local && set +a && npx drizzle-kit push`.
 
 ## Статус (2026-10-13)
-Прод поднят и проверен сквозь все слои. Бот @sk_crew_bot (id <bot-id>), privacy выключен
+Прод поднят и проверен сквозь все слои. Бот @sk_crew_bot, privacy выключен
 (`can_read_all_group_messages: true`). Все 6 переменных лежат в Vercel для production/preview/development
 (токены и ключи — как Secret, `APP_URL` и `OWNER_TG_USER_ID` — как Config). Webhook стоит на
-`https://<project>.vercel.app/api/telegram/crew`, ошибок доставки нет. `/api/cron/tick` отвечает
+`$APP_URL/api/telegram/crew`, ошибок доставки нет. `/api/cron/tick` отвечает
 `200 {"due":0,"sent":0}` с верным Bearer и `403` с неверным — то есть и Neon, и cron-авторизация работают.
-Владелец: tg user id <owner-id>, `is_owner` в базе проставлен. Space созданы два (личка и тестовая группа
-«Crew_bot_group», chat id <chat-id>), у обоих `timezone = America/Sao_Paulo`.
+Владелец: `is_owner` в базе проставлен. Space созданы два (личка и тестовая группа
+«Crew_bot_group»), у обоих `timezone = America/Sao_Paulo`.
 
 Защита деплоя: Vercel Authentication висит на direct-URL каждого деплоя (302 на sso-api), прод-алиас открыт.
-Поэтому `APP_URL` должен указывать именно на алиас `<project>.vercel.app`, иначе Telegram упрётся в SSO.
+Поэтому `APP_URL` должен указывать именно на прод-алиас `<project>.vercel.app`, иначе Telegram упрётся в SSO.
 
 Сквозной цикл проверен в тестовой группе: упоминание → агент (claude-opus-5-5, 2 успешных `agent_runs`)
 → `set_reminder` → минутный cron доставил напоминание в чат (задержка 48 с от срока). Кэш персоны работает:
