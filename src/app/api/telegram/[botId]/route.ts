@@ -72,6 +72,18 @@ async function handleUpdate(botId: string, update: Update) {
     if (args.tz) patch.timezone = args.tz;
     if (args.persona) template = { ...template, persona: args.persona };
     if (args.extract) template = { ...template, extract: args.extract === "on" || args.extract === "1" || args.extract === "true" };
+    if (args.digest) {
+      if (args.digest === "off") {
+        template = { ...template, digest: undefined };
+      } else {
+        const m = /^(\d{1,2})(?::(\d{2}))?$/.exec(args.digest);
+        if (!m) {
+          await sendPlain(bot, chatId, "Формат: /setup digest=09:00 (в той теме, куда слать) или digest=off", msg.message_id, threadId);
+          return;
+        }
+        template = { ...template, digest: { threadId: threadId ?? null, hour: Number(m[1]), minute: Number(m[2] ?? 0) } };
+      }
+    }
     patch.template = template;
     await db.update(schema.spaces).set(patch).where(eq(schema.spaces.id, space.id));
     if (person) await touchMember(space.id, person.id, "owner");
@@ -79,7 +91,8 @@ async function handleUpdate(botId: string, update: Update) {
       bot,
       chatId,
       `Space настроен.\nkind=${patch.kind ?? space.kind} template=${template.template ?? "-"} extract=${template.extract ? "on" : "off"} tz=${patch.timezone ?? space.timezone}` +
-        `\nДоступно: /setup template=${Object.keys(TEMPLATES).join("|")} kind=... tz=Europe/Lisbon extract=on|off persona="..."`,
+        (template.digest ? `\nежедневный список задач: ${String(template.digest.hour).padStart(2, "0")}:${String(template.digest.minute).padStart(2, "0")}${template.digest.threadId ? " в этой теме" : ""}` : "") +
+        `\nДоступно: /setup template=${Object.keys(TEMPLATES).join("|")} kind=... tz=Europe/Lisbon extract=on|off digest=09:00|off persona="..."`,
       msg.message_id,
       threadId,
     );

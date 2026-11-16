@@ -39,6 +39,7 @@ export type SpaceTemplate = {
   template?: string; // named template from src/lib/templates.ts
   extract?: boolean; // passively extract records/facts from every message (no mention needed)
   topics?: Record<string, string>; // forum topics: thread id -> name (filled from service messages)
+  digest?: { threadId?: number | null; hour: number; minute: number; lastSentDate?: string }; // daily to-do post
 };
 
 export const people = pgTable(
