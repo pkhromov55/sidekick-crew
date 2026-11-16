@@ -36,6 +36,8 @@ export type SpaceTemplate = {
   persona?: string; // extra instructions for this space
   language?: string;
   digestCron?: string;
+  template?: string; // named template from src/lib/templates.ts
+  extract?: boolean; // passively extract records/facts from every message (no mention needed)
 };
 
 export const people = pgTable(
@@ -178,4 +180,38 @@ export const integrations = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("integrations_provider").on(t.provider)],
+);
+
+// Structured entities the assistant keeps for a space: leads, contacts, stakeholders, deals.
+// `data` is free-form so each template can define its own fields.
+export const records = pgTable(
+  "records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    spaceId: uuid("space_id").notNull().references(() => spaces.id),
+    kind: text("kind").notNull(), // lead | contact | stakeholder | company | deal | other
+    title: text("title").notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("active"), // active | archived
+    ownerPersonId: uuid("owner_person_id").references(() => people.id),
+    sourceTgMessageId: bigint("source_tg_message_id", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("records_space_kind").on(t.spaceId, t.kind, t.status)],
+);
+
+// Long-lived knowledge documents for a space (onboarding docs, terms, transcripts).
+// Rendered into the cached system prefix, so the agent always has them.
+export const documents = pgTable(
+  "documents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    spaceId: uuid("space_id").notNull().references(() => spaces.id),
+    title: text("title").notNull(),
+    content: text("content").notNull(),
+    source: text("source"), // file name, url, "seed", ...
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("documents_space").on(t.spaceId)],
 );

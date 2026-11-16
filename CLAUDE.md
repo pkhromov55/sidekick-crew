@@ -16,17 +16,26 @@ Vercel (проект `crew`, прод-алиас в `APP_URL`; Neon подклю
 - `src/lib/telegram.ts` — кэш grammY-ботов, детект обращения (mention / reply / ЛС), отправка.
 - `src/lib/ingest.ts` — upsert space/person/member, запись сообщения, дедуп апдейтов.
 - `src/lib/context.ts` — сборка контекста Space текстом: участники, открытые задачи, память, последние 40 сообщений.
+- `src/lib/templates.ts` — именованные шаблоны Space (`/setup template=mentoring|client|team|project`): kind, персона-инструкции, флаг `extract`.
+- `src/lib/records.ts` — записи (лиды, контакты, стейкхолдеры, сделки): upsert по id/kind+title, список с фильтрами.
+- `src/lib/extract.ts` — пассивное извлечение (claude-haiku-5-5, structured output) записей и фактов из каждого сообщения в Space с `template.extract=true`. Без ответа в чат.
+- `scripts/seed-documents.ts` — `npm run db:seed-docs -- <tg_chat_id> <folder>`: грузит .md/.txt как документы знаний Space (данные не в репо).
 - `src/lib/agent.ts` — `runAgent()`: claude-opus-5-5, effort medium, `fallbacks: "default"`, кэшируемая персона в system,
-  инструменты create_task / complete_task / set_reminder / save_memory / search_messages. Все инструменты
+  инструменты create_task / complete_task / set_reminder / save_memory / search_messages / память (list/update/forget/restore) /
+  upsert_record / list_records / read_document. Документы Space (`documents`) идут в system вторым блоком с кэшем на 1 час. Все инструменты
   прошиты на `space.id` в замыкании — модель никогда не передаёт space_id сама.
 - `src/app/api/telegram/[botId]/route.ts` — webhook: проверка секрета, мгновенный 200, обработка в `waitUntil`.
-  Команды `/id`, `/setup kind=.. tz=.. persona=".."` (только владелец), `/status`, `/ask`.
+  Команды `/id`, `/setup template=.. kind=.. tz=.. extract=on|off persona=".."` (только владелец), `/doc Название` (+ .txt/.md/.csv файл), `/status`, `/ask`.
+  Reply на бота с тегом другого человека — не обращение к боту. Не-адресованные сообщения в Space с extract=on уходят в пассивное извлечение.
 - `src/app/api/cron/tick/route.ts` — отправка созревших напоминаний (Vercel Cron `* * * * *`, см. vercel.json).
 - `scripts/set-webhook.ts` — `npm run webhook:set -- crew` (нужны APP_URL и токен в .env.local).
 
 ## Env (см. .env.example)
 DATABASE_URL (ставит Neon), TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, ANTHROPIC_API_KEY, OWNER_TG_USER_ID, CRON_SECRET, APP_URL.
 Секреты только в `.env.local` и Vercel env. Никогда не печатать значения и не класть в код.
+
+## Локальная среда
+- Папка лежит в iCloud Drive (`~/Documents`). `node_modules` живёт в `node_modules.nosync` через симлинк, иначе iCloud выгружает файлы и tsc/next зависают с нулевым CPU. Если tsc «висит» — проверить `find node_modules -flags +dataless | wc -l`.
 
 ## Правила
 - Инструменты агента всегда скоупятся по space_id в коде. Данные одного чата не должны попадать в другой.

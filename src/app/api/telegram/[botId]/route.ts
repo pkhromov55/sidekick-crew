@@ -9,10 +9,13 @@ import { ingestMessage, markUpdateProcessed, recordBotMessage, touchMember } fro
 import { runAgent } from "@/lib/agent";
 import { type Attachment, downloadTelegramFile, fetchAnthropicFile, uploadAttachment } from "@/lib/files";
 import { getGranolaToken } from "@/lib/granola";
+import { extractFromMessage, shouldExtract } from "@/lib/extract";
+import { TEMPLATES } from "@/lib/templates";
+import { forwardLabel, personLabel } from "@/lib/context";
 
 export const maxDuration = 300;
 
-const KINDS = ["mentoring", "client", "team", "personal", "generic"];
+const KINDS = ["mentoring", "client", "team", "personal", "project", "generic"];
 
 // A document or photo on this message, or on the one it replies to.
 function pickFile(m?: Message): { fileId: string; fileName: string } | null {
@@ -54,18 +57,64 @@ async function handleUpdate(botId: string, update: Update) {
       [...text.matchAll(/(\w+)=("[^"]*"|\S+)/g)].map((m) => [m[1], m[2].replace(/^"|"$/g, "")]),
     );
     const patch: Partial<typeof schema.spaces.$inferInsert> = {};
+    let template = { ...space.template };
+    if (args.template) {
+      const tpl = TEMPLATES[args.template];
+      if (!tpl) {
+        await sendPlain(bot, chatId, `Нет такого шаблона. Есть: ${Object.keys(TEMPLATES).join(", ")}`, msg.message_id);
+        return;
+      }
+      patch.kind = tpl.kind;
+      template = { ...template, template: tpl.id, extract: tpl.extract };
+    }
     if (args.kind && KINDS.includes(args.kind)) patch.kind = args.kind;
     if (args.tz) patch.timezone = args.tz;
-    if (args.persona) patch.template = { ...space.template, persona: args.persona };
-    if (Object.keys(patch).length) await db.update(schema.spaces).set(patch).where(eq(schema.spaces.id, space.id));
+    if (args.persona) template = { ...template, persona: args.persona };
+    if (args.extract) template = { ...template, extract: args.extract === "on" || args.extract === "1" || args.extract === "true" };
+    patch.template = template;
+    await db.update(schema.spaces).set(patch).where(eq(schema.spaces.id, space.id));
     if (person) await touchMember(space.id, person.id, "owner");
     await sendPlain(
       bot,
       chatId,
-      `Space настроен.\nkind=${patch.kind ?? space.kind} tz=${patch.timezone ?? space.timezone}` +
-        `\nДоступно: /setup kind=mentoring|client|team|personal tz=Europe/Lisbon persona="..."`,
+      `Space настроен.\nkind=${patch.kind ?? space.kind} template=${template.template ?? "-"} extract=${template.extract ? "on" : "off"} tz=${patch.timezone ?? space.timezone}` +
+        `\nДоступно: /setup template=${Object.keys(TEMPLATES).join("|")} kind=... tz=Europe/Lisbon extract=on|off persona="..."`,
       msg.message_id,
     );
+    return;
+  }
+  // /doc Title  — with a text-like file attached (or in reply to one): store as a knowledge document.
+  if (text.startsWith("/doc")) {
+    if (!isOwner) {
+      await sendPlain(bot, chatId, "Добавлять документы может только владелец.", msg.message_id);
+      return;
+    }
+    const src = msg.document ? msg : msg.reply_to_message?.document ? msg.reply_to_message : null;
+    const title = text.replace(/^\/doc(@\w+)?\s*/, "").trim() || src?.document?.file_name || "Документ";
+    if (!src?.document) {
+      const docs = await db.query.documents.findMany({ where: (d, { eq }) => eq(d.spaceId, space.id) });
+      await sendPlain(
+        bot,
+        chatId,
+        (docs.length ? docs.map((d) => `• [${d.id.slice(0, 8)}] ${d.title} (${d.content.length} символов)`).join("\n") : "Документов нет.") +
+          "\n\nЧтобы добавить: пришли .txt/.md/.csv с подписью «/doc Название» или ответь так на файл.",
+        msg.message_id,
+      );
+      return;
+    }
+    const name = src.document.file_name ?? "file";
+    if (!/\.(txt|md|csv|tsv|json|html?)$/i.test(name)) {
+      await sendPlain(bot, chatId, "Пока принимаю только текстовые файлы: .txt, .md, .csv. PDF и docx — позже.", msg.message_id);
+      return;
+    }
+    try {
+      const dl = await downloadTelegramFile(botId, bot, src.document.file_id, name);
+      const content = new TextDecoder("utf-8").decode(dl.bytes);
+      const [d] = await db.insert(schema.documents).values({ spaceId: space.id, title, content, source: name }).returning();
+      await sendPlain(bot, chatId, `Документ сохранён: [${d.id.slice(0, 8)}] ${title}, ${content.length} символов.`, msg.message_id);
+    } catch (e) {
+      await sendPlain(bot, chatId, `Не удалось сохранить документ: ${e instanceof Error ? e.message : String(e)}`, msg.message_id);
+    }
     return;
   }
   if (text.startsWith("/status")) {
@@ -82,7 +131,24 @@ async function handleUpdate(botId: string, update: Update) {
 
   // ---- Agent ----------------------------------------------------------
   const addressed = isAddressedToBot(ctx) || text.startsWith("/ask");
-  if (!addressed) return;
+  if (!addressed) {
+    if (shouldExtract(space, text, Boolean(msg.from?.is_bot))) {
+      try {
+        const fwd = forwardLabel(msg.forward_origin ? { forward_origin: msg.forward_origin } : null);
+        const n = await extractFromMessage({
+          space,
+          text,
+          author: personLabel(person),
+          forwardedFrom: fwd,
+          tgMessageId: msg.message_id,
+        });
+        if (n.records || n.facts) console.log("extracted", space.id, n);
+      } catch (e) {
+        console.error("extract failed", e instanceof Error ? e.message : e);
+      }
+    }
+    return;
+  }
 
   // Hand the agent any attachment on this message, or on the one it replies to.
   const tgFile = pickFile(msg) ?? pickFile(msg.reply_to_message);

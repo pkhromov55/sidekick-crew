@@ -10,7 +10,8 @@
     "db:push": "drizzle-kit push",
     "db:extra": "node --env-file=.env.local scripts/db-extra.ts",
     "webhook:set": "node --env-file=.env.local scripts/set-webhook.ts",
-    "granola:auth": "node --env-file=.env.local scripts/granola-auth.ts"
+    "granola:auth": "node --env-file=.env.local scripts/granola-auth.ts",
+    "db:seed-docs": "node --env-file=.env.local scripts/seed-documents.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.133.0",

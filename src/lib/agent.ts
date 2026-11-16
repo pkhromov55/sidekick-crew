@@ -4,7 +4,8 @@ import { z } from "zod";
 import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getBot } from "./bots";
-import { buildSpaceContext, nowInTz, personLabel } from "./context";
+import { buildDocumentsBlock, buildSpaceContext, nowInTz, personLabel } from "./context";
+import { formatRecord, listRecords, upsertRecord } from "./records";
 import { type Attachment, attachmentBlock, collectGeneratedFileIds, FILES_BETA } from "./files";
 import { GRANOLA_MCP_URL } from "./granola";
 
@@ -287,6 +288,81 @@ function makeTools(input: AgentInput, calls: unknown[]) {
     },
   });
 
+  const upsertRecordTool = betaZodTool({
+    name: "upsert_record",
+    description:
+      "Создать или обновить запись: лид, контакт, стейкхолдер, компания, сделка. Если передан id (8 символов) — обновляет её; иначе ищет запись того же kind с таким же названием и обновляет, иначе создаёт. Поля сливаются с существующими.",
+    inputSchema: z.object({
+      id: z.string().optional().describe("Короткий id существующей записи, если обновляешь"),
+      kind: z.enum(["lead", "contact", "stakeholder", "company", "deal", "other"]),
+      title: z.string().describe("Название компании или имя человека"),
+      fields: z.array(z.object({ key: z.string(), value: z.string() })).optional().describe("Поля, например stage, contact, email, country, source, amount, next_step, next_date, notes"),
+      status: z.enum(["active", "archived"]).optional(),
+      owner_username: z.string().optional().describe("Ответственный, username без @"),
+    }),
+    run: async (a) => {
+      const owner = await findPersonByUsername(space.id, a.owner_username);
+      const { row, created } = await upsertRecord(space.id, {
+        id: a.id,
+        kind: a.kind,
+        title: a.title,
+        fields: Object.fromEntries((a.fields ?? []).map((f) => [f.key, f.value])),
+        status: a.status,
+        ownerPersonId: owner?.id ?? null,
+        sourceTgMessageId: input.sourceTgMessageId ?? null,
+      });
+      const r = `${created ? "Создана" : "Обновлена"}: ${formatRecord(row)}`;
+      log("upsert_record", a, r);
+      return r;
+    },
+  });
+
+  const listRecordsTool = betaZodTool({
+    name: "list_records",
+    description: "Список записей space с фильтрами: kind, status (active|archived|all), поиск по названию и полям. Для справки по лидам используй kind=lead.",
+    inputSchema: z.object({
+      kind: z.string().optional(),
+      status: z.enum(["active", "archived", "all"]).optional(),
+      query: z.string().optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+    }),
+    run: async (a) => {
+      const rows = await listRecords(space.id, a);
+      const r = rows.length ? rows.map(formatRecord).join("\n") : "Записей нет";
+      log("list_records", a, `${rows.length} rows`);
+      return r;
+    },
+  });
+
+  const readDocument = betaZodTool({
+    name: "read_document",
+    description: "Прочитать документ space целиком по короткому id (8 символов) или по части названия, с указанием смещения, если документ большой.",
+    inputSchema: z.object({
+      id_or_title: z.string(),
+      offset: z.number().int().min(0).optional(),
+      length: z.number().int().min(1000).max(60000).optional(),
+    }),
+    run: async (a) => {
+      const docs = await db
+        .select()
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.spaceId, space.id),
+            or(sql`${schema.documents.id}::text like ${a.id_or_title + "%"}`, ilike(schema.documents.title, `%${a.id_or_title}%`)),
+          ),
+        )
+        .limit(1);
+      if (!docs.length) return "Документ не найден";
+      const d = docs[0];
+      const off = a.offset ?? 0;
+      const len = a.length ?? 30000;
+      const r = `# ${d.title} (${d.content.length} символов, offset ${off})\n` + d.content.slice(off, off + len);
+      log("read_document", a, `${d.title} ${off}..${off + len}`);
+      return r;
+    },
+  });
+
   return [
     createTask,
     completeTask,
@@ -297,6 +373,9 @@ function makeTools(input: AgentInput, calls: unknown[]) {
     updateMemory,
     forgetMemory,
     restoreMemory,
+    upsertRecordTool,
+    listRecordsTool,
+    readDocument,
   ];
 }
 
@@ -304,7 +383,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const { space } = input;
   const bot = getBot(space.botId);
   const calls: unknown[] = [];
-  const context = await buildSpaceContext(space);
+  const [context, documentsBlock] = await Promise.all([buildSpaceContext(space), buildDocumentsBlock(space.id)]);
 
   const userText =
     `Сейчас: ${nowInTz(space.timezone)} (${space.timezone}).\n` +
@@ -343,7 +422,9 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         }
       : {}),
     system: [
-      { type: "text", text: bot.persona, cache_control: { type: "ephemeral" } },
+      { type: "text", text: bot.persona },
+      // Documents change rarely: cache them together with the persona for an hour.
+      ...(documentsBlock ? [{ type: "text" as const, text: documentsBlock, cache_control: { type: "ephemeral" as const, ttl: "1h" as const } }] : [{ type: "text" as const, text: "", cache_control: { type: "ephemeral" as const } }]),
       { type: "text", text: context },
     ],
     tools: [

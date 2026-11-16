@@ -1,5 +1,7 @@
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
+import { formatRecord } from "./records";
+import { getTemplate } from "./templates";
 
 type Space = typeof schema.spaces.$inferSelect;
 
@@ -22,7 +24,7 @@ function fmtTime(d: Date, tz: string) {
 // Everything the agent should know about this space, rendered as text.
 // Order matters for prompt caching: stable things first, volatile last.
 export async function buildSpaceContext(space: Space, recentLimit = 40) {
-  const [members, openTasks, mems, recent] = await Promise.all([
+  const [members, openTasks, mems, recent, recs] = await Promise.all([
     db
       .select({ role: schema.spaceMembers.role, notes: schema.spaceMembers.notes, p: schema.people })
       .from(schema.spaceMembers)
@@ -52,12 +54,20 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
       .where(eq(schema.messages.spaceId, space.id))
       .orderBy(desc(schema.messages.sentAt))
       .limit(recentLimit),
+    db
+      .select()
+      .from(schema.records)
+      .where(and(eq(schema.records.spaceId, space.id), eq(schema.records.status, "active")))
+      .orderBy(desc(schema.records.updatedAt))
+      .limit(80),
   ]);
 
   const tz = space.timezone;
   const lines: string[] = [];
   lines.push(`# Space: ${space.title ?? space.tgChatId}`);
   lines.push(`Тип: ${space.kind}. Таймзона: ${tz}.`);
+  const tpl = space.template.template ? getTemplate(space.template.template) : undefined;
+  if (tpl) lines.push(`\nШаблон: ${tpl.id}.\n${tpl.persona}`);
   if (space.template.persona) lines.push(`\nИнструкции для этого space:\n${space.template.persona}`);
   if (space.summary) lines.push(`\n## Сводка по чату\n${space.summary}`);
 
@@ -80,6 +90,14 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
     for (const m of rules) lines.push(`- [${m.id.slice(0, 8)}] ${m.content}`);
   }
 
+  if (recs.length) {
+    lines.push(`\n## Записи (лиды, контакты, стейкхолдеры)`);
+    const byKind = new Map<string, number>();
+    for (const r of recs) byKind.set(r.kind, (byKind.get(r.kind) ?? 0) + 1);
+    lines.push([...byKind].map(([k, n]) => `${k}: ${n}`).join(", "));
+    for (const r of recs) lines.push(`- ${formatRecord(r)}`);
+  }
+
   lines.push(`\n## Память`);
   if (!facts.length) lines.push("(пусто)");
   for (const m of facts) lines.push(`- [${m.id.slice(0, 8)}] (${m.kind}) ${m.content}`);
@@ -88,9 +106,44 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
   for (const { m, p } of recent.reverse()) {
     const who = m.fromBot ? "Crew" : personLabel(p);
     const body = m.text ?? `[${m.kind}${m.fileName ? `: ${m.fileName}` : ""}]`;
-    lines.push(`[${fmtTime(m.sentAt, tz)}] #${m.tgMessageId} ${who}: ${body}`);
+    const fwd = forwardLabel(m.meta);
+    lines.push(`[${fmtTime(m.sentAt, tz)}] #${m.tgMessageId} ${who}${fwd ? ` (переслал от ${fwd})` : ""}: ${body}`);
   }
   return lines.join("\n");
+}
+
+// Knowledge documents as a separate, rarely-changing block (cached in the system prefix).
+export async function buildDocumentsBlock(spaceId: string, maxChars = 200_000) {
+  const docs = await db.select().from(schema.documents).where(eq(schema.documents.spaceId, spaceId)).orderBy(schema.documents.createdAt);
+  if (!docs.length) return "";
+  const out: string[] = ["# Документы этого space"];
+  let used = 0;
+  for (const d of docs) {
+    const budget = maxChars - used;
+    if (budget <= 0) {
+      out.push(`\n## ${d.title}\n(не поместился в контекст, читай через read_document)`);
+      continue;
+    }
+    const body = d.content.length > budget ? d.content.slice(0, budget) + "\n…(обрезано, остальное через read_document)" : d.content;
+    used += body.length;
+    out.push(`\n## ${d.title} [${d.id.slice(0, 8)}]\n${body}`);
+  }
+  return out.join("\n");
+}
+
+export function forwardLabel(meta: Record<string, unknown> | null | undefined): string | null {
+  const fo = meta?.forward_origin as Record<string, unknown> | undefined;
+  if (!fo) return null;
+  const t = fo.type as string;
+  if (t === "user") {
+    const u = fo.sender_user as { first_name?: string; last_name?: string; username?: string };
+    const name = [u.first_name, u.last_name].filter(Boolean).join(" ");
+    return u.username ? `${name} (@${u.username})` : name || "user";
+  }
+  if (t === "hidden_user") return String(fo.sender_user_name ?? "hidden user");
+  if (t === "chat") return String((fo.sender_chat as { title?: string })?.title ?? "chat");
+  if (t === "channel") return String((fo.chat as { title?: string })?.title ?? "channel");
+  return null;
 }
 
 export function nowInTz(tz: string) {
