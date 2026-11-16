@@ -424,12 +424,17 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
           ],
         }
       : {}),
-    system: [
-      { type: "text", text: bot.persona },
-      // Documents change rarely: cache them together with the persona for an hour.
-      ...(documentsBlock ? [{ type: "text" as const, text: documentsBlock, cache_control: { type: "ephemeral" as const, ttl: "1h" as const } }] : [{ type: "text" as const, text: "", cache_control: { type: "ephemeral" as const } }]),
-      { type: "text", text: context },
-    ],
+    // Persona + documents change rarely: that prefix is cached for an hour; the volatile context follows.
+    system: documentsBlock
+      ? [
+          { type: "text", text: bot.persona },
+          { type: "text", text: documentsBlock, cache_control: { type: "ephemeral", ttl: "1h" } },
+          { type: "text", text: context },
+        ]
+      : [
+          { type: "text", text: bot.persona, cache_control: { type: "ephemeral", ttl: "1h" } },
+          { type: "text", text: context },
+        ],
     tools: [
       CODE_EXECUTION,
       WEB_FETCH,
