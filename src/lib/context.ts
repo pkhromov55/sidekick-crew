@@ -52,7 +52,7 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
       .select({ m: schema.messages, p: schema.people })
       .from(schema.messages)
       .leftJoin(schema.people, eq(schema.people.id, schema.messages.personId))
-      .where(eq(schema.messages.spaceId, space.id))
+      .where(and(eq(schema.messages.spaceId, space.id), eq(schema.messages.hidden, false)))
       .orderBy(desc(schema.messages.sentAt))
       .limit(recentLimit),
     db

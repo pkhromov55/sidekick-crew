@@ -82,6 +82,7 @@ export const messages = pgTable(
     fileId: text("file_id"),
     fileName: text("file_name"),
     meta: jsonb("meta").$type<Record<string, unknown>>(),
+    hidden: boolean("hidden").notNull().default(false), // /forget: excluded from context and search
     sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -1,7 +1,7 @@
 import { waitUntil } from "@vercel/functions";
 import { InputFile } from "grammy";
 import type { Message, Update } from "grammy/types";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getBot } from "@/lib/bots";
 import { getTelegramBot, isAddressedToBot, sendPlain, stripMention } from "@/lib/telegram";
@@ -118,6 +118,31 @@ async function handleUpdate(botId: string, update: Update) {
     } catch (e) {
       await sendPlain(bot, chatId, `Не удалось сохранить документ: ${e instanceof Error ? e.message : String(e)}`, msg.message_id, threadId);
     }
+    return;
+  }
+  // /forget — in reply to any message: hide it from the bot's context and search.
+  // Telegram does not tell bots about deletions, so this is the only way to make the bot forget.
+  if (text.startsWith("/forget")) {
+    const target = msg.reply_to_message;
+    if (!target) {
+      await sendPlain(bot, chatId, "Ответь командой /forget на сообщение, которое бот должен забыть.", msg.message_id, threadId);
+      return;
+    }
+    const rows = await db
+      .update(schema.messages)
+      .set({ hidden: true })
+      .where(and(eq(schema.messages.spaceId, space.id), eq(schema.messages.tgMessageId, target.message_id)))
+      .returning({ id: schema.messages.id });
+    await db.update(schema.messages).set({ hidden: true }).where(and(eq(schema.messages.spaceId, space.id), eq(schema.messages.tgMessageId, msg.message_id)));
+    await sendPlain(
+      bot,
+      chatId,
+      rows.length
+        ? "Забыл это сообщение: его больше нет в контексте и поиске. Записи и память, созданные по нему, можно убрать отдельно: «забудь запись/факт …»."
+        : "Этого сообщения нет в журнале (бот его не видел).",
+      msg.message_id,
+      threadId,
+    );
     return;
   }
   if (text.startsWith("/status")) {

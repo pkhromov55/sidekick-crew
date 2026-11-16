@@ -161,6 +161,7 @@ function makeTools(input: AgentInput, calls: unknown[]) {
         .where(
           and(
             eq(schema.messages.spaceId, space.id),
+            eq(schema.messages.hidden, false),
             or(
               sql`to_tsvector('simple', coalesce(${schema.messages.text}, '')) @@ plainto_tsquery('simple', ${a.query})`,
               ilike(schema.messages.text, `%${a.query}%`),
