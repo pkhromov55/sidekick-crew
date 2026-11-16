@@ -88,6 +88,14 @@ export async function ingestMessage(botId: string, ctx: Context): Promise<Ingest
     kind = "system";
   }
 
+  // Forum topics: remember their names so transcripts and replies can be attributed to a topic.
+  const topicName = msg.forum_topic_created?.name ?? msg.forum_topic_edited?.name;
+  if (topicName && msg.message_thread_id) {
+    const topics = { ...(space.template.topics ?? {}), [String(msg.message_thread_id)]: topicName };
+    await db.update(schema.spaces).set({ template: { ...space.template, topics } }).where(eq(schema.spaces.id, space.id));
+    space.template = { ...space.template, topics };
+  }
+
   const [message] = await db
     .insert(schema.messages)
     .values({
@@ -100,7 +108,10 @@ export async function ingestMessage(botId: string, ctx: Context): Promise<Ingest
       replyToTgMessageId: msg.reply_to_message?.message_id ?? null,
       fileId,
       fileName,
-      meta: msg.forward_origin ? { forward_origin: msg.forward_origin } : null,
+      meta: {
+        ...(msg.forward_origin ? { forward_origin: msg.forward_origin } : {}),
+        ...(msg.is_topic_message && msg.message_thread_id ? { thread_id: msg.message_thread_id } : {}),
+      },
       sentAt: new Date(msg.date * 1000),
     })
     .onConflictDoNothing()

@@ -29,6 +29,7 @@ export type AgentInput = {
   text: string;
   askedBy?: { id: string; label: string } | null;
   sourceTgMessageId?: number;
+  threadId?: number | null; // forum topic the request came from
   attachments?: Attachment[];
   // Present only for the owner: unlocks the Granola MCP toolset for this run.
   granolaToken?: string | null;
@@ -114,7 +115,7 @@ function makeTools(input: AgentInput, calls: unknown[]) {
       const person = await findPersonByUsername(space.id, a.target_username);
       const [r] = await db
         .insert(schema.reminders)
-        .values({ spaceId: space.id, fireAt: new Date(a.fire_at), text: a.text, targetPersonId: person?.id ?? null })
+        .values({ spaceId: space.id, fireAt: new Date(a.fire_at), text: a.text, targetPersonId: person?.id ?? null, threadId: input.threadId ?? null })
         .returning();
       const res = `Напоминание поставлено на ${r.fireAt.toISOString()}`;
       log("set_reminder", a, res);
@@ -388,6 +389,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const userText =
     `Сейчас: ${nowInTz(space.timezone)} (${space.timezone}).\n` +
     (input.askedBy ? `К тебе обратился ${input.askedBy.label} (trigger: ${input.trigger}).\n` : `Trigger: ${input.trigger}.\n`) +
+    (input.threadId ? `Тема чата: ${space.template.topics?.[String(input.threadId)] ?? `#${input.threadId}`}.\n` : "") +
     `Сообщение:\n${input.text}`;
 
   // Attachments first, then the text that refers to them.

@@ -40,16 +40,17 @@ async function handleUpdate(botId: string, update: Update) {
   const { space, person } = await ingestMessage(botId, ctx);
   const text = msg.text ?? msg.caption ?? "";
   const chatId = msg.chat.id;
+  const threadId = msg.is_topic_message && msg.message_thread_id ? msg.message_thread_id : undefined;
   const isOwner = Boolean(person?.isOwner);
 
   // ---- Commands -------------------------------------------------------
   if (text.startsWith("/id")) {
-    await sendPlain(bot, chatId, `Ваш user id: ${msg.from?.id}\nchat id: ${chatId}`, msg.message_id);
+    await sendPlain(bot, chatId, `Ваш user id: ${msg.from?.id}\nchat id: ${chatId}`, msg.message_id, threadId);
     return;
   }
   if (text.startsWith("/setup")) {
     if (!isOwner) {
-      await sendPlain(bot, chatId, "Настраивать space может только владелец бота.", msg.message_id);
+      await sendPlain(bot, chatId, "Настраивать space может только владелец бота.", msg.message_id, threadId);
       return;
     }
     // /setup kind=mentoring tz=Europe/Lisbon persona=...
@@ -61,7 +62,7 @@ async function handleUpdate(botId: string, update: Update) {
     if (args.template) {
       const tpl = TEMPLATES[args.template];
       if (!tpl) {
-        await sendPlain(bot, chatId, `Нет такого шаблона. Есть: ${Object.keys(TEMPLATES).join(", ")}`, msg.message_id);
+        await sendPlain(bot, chatId, `Нет такого шаблона. Есть: ${Object.keys(TEMPLATES).join(", ")}`, msg.message_id, threadId);
         return;
       }
       patch.kind = tpl.kind;
@@ -80,13 +81,14 @@ async function handleUpdate(botId: string, update: Update) {
       `Space настроен.\nkind=${patch.kind ?? space.kind} template=${template.template ?? "-"} extract=${template.extract ? "on" : "off"} tz=${patch.timezone ?? space.timezone}` +
         `\nДоступно: /setup template=${Object.keys(TEMPLATES).join("|")} kind=... tz=Europe/Lisbon extract=on|off persona="..."`,
       msg.message_id,
+      threadId,
     );
     return;
   }
   // /doc Title  — with a text-like file attached (or in reply to one): store as a knowledge document.
   if (text.startsWith("/doc")) {
     if (!isOwner) {
-      await sendPlain(bot, chatId, "Добавлять документы может только владелец.", msg.message_id);
+      await sendPlain(bot, chatId, "Добавлять документы может только владелец.", msg.message_id, threadId);
       return;
     }
     const src = msg.document ? msg : msg.reply_to_message?.document ? msg.reply_to_message : null;
@@ -99,21 +101,22 @@ async function handleUpdate(botId: string, update: Update) {
         (docs.length ? docs.map((d) => `• [${d.id.slice(0, 8)}] ${d.title} (${d.content.length} символов)`).join("\n") : "Документов нет.") +
           "\n\nЧтобы добавить: пришли .txt/.md/.csv с подписью «/doc Название» или ответь так на файл.",
         msg.message_id,
+        threadId,
       );
       return;
     }
     const name = src.document.file_name ?? "file";
     if (!/\.(txt|md|csv|tsv|json|html?)$/i.test(name)) {
-      await sendPlain(bot, chatId, "Пока принимаю только текстовые файлы: .txt, .md, .csv. PDF и docx — позже.", msg.message_id);
+      await sendPlain(bot, chatId, "Пока принимаю только текстовые файлы: .txt, .md, .csv. PDF и docx — позже.", msg.message_id, threadId);
       return;
     }
     try {
       const dl = await downloadTelegramFile(botId, bot, src.document.file_id, name);
       const content = new TextDecoder("utf-8").decode(dl.bytes);
       const [d] = await db.insert(schema.documents).values({ spaceId: space.id, title, content, source: name }).returning();
-      await sendPlain(bot, chatId, `Документ сохранён: [${d.id.slice(0, 8)}] ${title}, ${content.length} символов.`, msg.message_id);
+      await sendPlain(bot, chatId, `Документ сохранён: [${d.id.slice(0, 8)}] ${title}, ${content.length} символов.`, msg.message_id, threadId);
     } catch (e) {
-      await sendPlain(bot, chatId, `Не удалось сохранить документ: ${e instanceof Error ? e.message : String(e)}`, msg.message_id);
+      await sendPlain(bot, chatId, `Не удалось сохранить документ: ${e instanceof Error ? e.message : String(e)}`, msg.message_id, threadId);
     }
     return;
   }
@@ -125,7 +128,7 @@ async function handleUpdate(botId: string, update: Update) {
     const body = tasks.length
       ? tasks.map((t) => `• [${t.id.slice(0, 8)}] ${t.title}${t.dueAt ? ` — до ${t.dueAt.toISOString().slice(0, 10)}` : ""}`).join("\n")
       : "Открытых задач нет.";
-    await sendPlain(bot, chatId, body, msg.message_id);
+    await sendPlain(bot, chatId, body, msg.message_id, threadId);
     return;
   }
 
@@ -175,7 +178,7 @@ async function handleUpdate(botId: string, update: Update) {
   // Everyone else's request is built without it, so there is nothing to bypass.
   const granolaToken = person?.isOwner ? await getGranolaToken() : null;
 
-  await bot.api.sendChatAction(chatId, "typing").catch(() => {});
+  await bot.api.sendChatAction(chatId, "typing", { message_thread_id: threadId }).catch(() => {});
   try {
     const res = await runAgent({
       space,
@@ -183,17 +186,18 @@ async function handleUpdate(botId: string, update: Update) {
       text: clean + quoted + attachNote,
       askedBy: person ? { id: person.id, label: `${person.firstName ?? ""} ${person.username ? "@" + person.username : ""}`.trim() } : null,
       sourceTgMessageId: msg.message_id,
+      threadId: threadId ?? null,
       attachments,
       granolaToken,
     });
-    const sentMsgs = await sendPlain(bot, chatId, res.text, msg.message_id);
+    const sentMsgs = await sendPlain(bot, chatId, res.text, msg.message_id, threadId);
     for (const m of sentMsgs) await recordBotMessage(space.id, m.message_id, m.text ?? "");
 
     // Deliver whatever the sandbox produced as real Telegram documents.
     for (const fileId of res.generatedFileIds) {
       try {
         const f = await fetchAnthropicFile(fileId);
-        const doc = await bot.api.sendDocument(chatId, new InputFile(f.bytes, f.fileName));
+        const doc = await bot.api.sendDocument(chatId, new InputFile(f.bytes, f.fileName), { message_thread_id: threadId });
         await recordBotMessage(space.id, doc.message_id, `[файл] ${f.fileName}`);
       } catch (e) {
         console.error("send generated file failed", fileId, e);
@@ -203,7 +207,7 @@ async function handleUpdate(botId: string, update: Update) {
     const err = e instanceof Error ? e.message : String(e);
     console.error("agent error", err);
     await db.insert(schema.agentRuns).values({ spaceId: space.id, trigger, input: clean, error: err });
-    await sendPlain(bot, chatId, "Не получилось ответить, ошибка записана в лог.", msg.message_id);
+    await sendPlain(bot, chatId, "Не получилось ответить, ошибка записана в лог.", msg.message_id, threadId);
   }
 }
 

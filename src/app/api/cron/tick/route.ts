@@ -25,7 +25,7 @@ export async function GET(req: Request) {
       const bot = await getTelegramBot(s.botId);
       const tag = p?.username ? `@${p.username} ` : "";
       const text = `${tag}⏰ ${r.text}`;
-      const m = await bot.api.sendMessage(s.tgChatId, text);
+      const m = await bot.api.sendMessage(s.tgChatId, text, { message_thread_id: r.threadId ?? undefined });
       await recordBotMessage(s.id, m.message_id, text);
       await db.update(schema.reminders).set({ status: "sent", sentAt: new Date() }).where(eq(schema.reminders.id, r.id));
       sent++;

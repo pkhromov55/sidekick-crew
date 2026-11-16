@@ -73,6 +73,9 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
   if (space.template.persona) lines.push(`\nИнструкции для этого space:\n${space.template.persona}`);
   if (space.summary) lines.push(`\n## Сводка по чату\n${space.summary}`);
 
+  const topics = Object.entries(space.template.topics ?? {});
+  if (topics.length) lines.push(`\nТемы чата: ${topics.map(([id, n]) => `${n} (#${id})`).join(", ")}.`);
+
   lines.push(`\n## Участники`);
   for (const m of members) lines.push(`- ${personLabel(m.p)} — ${m.role}${m.notes ? `: ${m.notes}` : ""}`);
 
@@ -109,7 +112,9 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
     const who = m.fromBot ? botName : personLabel(p);
     const body = m.text ?? `[${m.kind}${m.fileName ? `: ${m.fileName}` : ""}]`;
     const fwd = forwardLabel(m.meta);
-    lines.push(`[${fmtTime(m.sentAt, tz)}] #${m.tgMessageId} ${who}${fwd ? ` (переслал от ${fwd})` : ""}: ${body}`);
+    const th = (m.meta as Record<string, unknown> | null)?.thread_id;
+    const topic = th ? (space.template.topics?.[String(th)] ?? `#${th}`) : null;
+    lines.push(`[${fmtTime(m.sentAt, tz)}]${topic ? ` [${topic}]` : ""} #${m.tgMessageId} ${who}${fwd ? ` (переслал от ${fwd})` : ""}: ${body}`);
   }
   return lines.join("\n");
 }

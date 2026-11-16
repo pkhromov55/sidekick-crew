@@ -38,6 +38,7 @@ export type SpaceTemplate = {
   digestCron?: string;
   template?: string; // named template from src/lib/templates.ts
   extract?: boolean; // passively extract records/facts from every message (no mention needed)
+  topics?: Record<string, string>; // forum topics: thread id -> name (filled from service messages)
 };
 
 export const people = pgTable(
@@ -116,6 +117,7 @@ export const reminders = pgTable(
     text: text("text").notNull(),
     targetPersonId: uuid("target_person_id").references(() => people.id),
     taskId: uuid("task_id").references(() => tasks.id),
+    threadId: bigint("thread_id", { mode: "number" }), // forum topic to post into, if any
     status: text("status").notNull().default("pending"), // pending | sent | cancelled
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     sentAt: timestamp("sent_at", { withTimezone: true }),

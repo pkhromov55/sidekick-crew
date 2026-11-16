@@ -61,7 +61,7 @@ export function splitForTelegram(text: string, limit = 4000): string[] {
   return out.filter((c) => c.length > 0);
 }
 
-export async function sendPlain(bot: Bot, chatId: number, text: string, replyTo?: number) {
+export async function sendPlain(bot: Bot, chatId: number, text: string, replyTo?: number, threadId?: number) {
   const chunks = splitForTelegram(text);
   const sent = [];
   let first = true;
@@ -69,6 +69,7 @@ export async function sendPlain(bot: Bot, chatId: number, text: string, replyTo?
     sent.push(
       await bot.api.sendMessage(chatId, chunk, {
         reply_parameters: first && replyTo ? { message_id: replyTo } : undefined,
+        message_thread_id: threadId,
         link_preview_options: { is_disabled: true },
       }),
     );
