@@ -2,6 +2,7 @@ import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { formatRecord } from "./records";
 import { getTemplate } from "./templates";
+import { getBot } from "./bots";
 
 type Space = typeof schema.spaces.$inferSelect;
 
@@ -63,6 +64,7 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
   ]);
 
   const tz = space.timezone;
+  const botName = getBot(space.botId).name;
   const lines: string[] = [];
   lines.push(`# Space: ${space.title ?? space.tgChatId}`);
   lines.push(`Тип: ${space.kind}. Таймзона: ${tz}.`);
@@ -104,7 +106,7 @@ export async function buildSpaceContext(space: Space, recentLimit = 40) {
 
   lines.push(`\n## Последние сообщения (старые сверху)`);
   for (const { m, p } of recent.reverse()) {
-    const who = m.fromBot ? "Crew" : personLabel(p);
+    const who = m.fromBot ? botName : personLabel(p);
     const body = m.text ?? `[${m.kind}${m.fileName ? `: ${m.fileName}` : ""}]`;
     const fwd = forwardLabel(m.meta);
     lines.push(`[${fmtTime(m.sentAt, tz)}] #${m.tgMessageId} ${who}${fwd ? ` (переслал от ${fwd})` : ""}: ${body}`);

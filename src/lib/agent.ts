@@ -170,7 +170,7 @@ function makeTools(input: AgentInput, calls: unknown[]) {
         .limit(limit);
       const r = rows.length
         ? rows
-            .map(({ m, p }) => `[${m.sentAt.toISOString().slice(0, 16)}] #${m.tgMessageId} ${m.fromBot ? "Crew" : personLabel(p)}: ${m.text}`)
+            .map(({ m, p }) => `[${m.sentAt.toISOString().slice(0, 16)}] #${m.tgMessageId} ${m.fromBot ? getBot(space.botId).name : personLabel(p)}: ${m.text}`)
             .join("\n")
         : "Ничего не найдено";
       log("search_messages", a, `${rows.length} rows`);
